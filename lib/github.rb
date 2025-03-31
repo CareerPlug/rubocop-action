@@ -68,6 +68,19 @@ module Github
       .map { |file| File.new(file) }
   end
 
+  def self.pull_request_erb_files(owner_and_repository, pr_number)
+    changed_files = []
+    1.step do |page|
+      files = Github.get!("/repos/#{owner_and_repository}/pulls/#{pr_number}/files?per_page=100&page=#{page}")
+      changed_files.concat(files)
+      break if files.length < 100
+    end
+    changed_files
+      .reject { |file| file.fetch("status") == "removed" }
+      .select { |file| file.fetch("filename").end_with?(".erb") }
+      .map { |file| File.new(file) }
+  end
+
   def self.request(request_class, path, params = nil)
     request = request_class.new(path)
     request.content_type = "application/json"
