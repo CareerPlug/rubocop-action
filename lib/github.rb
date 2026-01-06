@@ -18,7 +18,7 @@ module Github
     end
 
     def changed_lines
-      patch = @file.fetch("patch") || ""
+      patch = @file.fetch("patch", "")
       line_number = 0
       patch.each_line.with_object([]) do |line_content, lines|
         case line_content
