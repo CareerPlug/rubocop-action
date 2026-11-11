@@ -50,7 +50,7 @@ files_with_offenses =
 
 puts "Fetching PR comments from https://api.github.com/repos/#{owner_and_repository}/pulls/#{pr_number}/comments"
 
-existing_comments = Github.get!("/repos/#{owner_and_repository}/pulls/#{pr_number}/comments")
+existing_comments = Github.get_paginated!("/repos/#{owner_and_repository}/pulls/#{pr_number}/comments")
 
 comments_made_by_rubocop = existing_comments.select do |comment|
   comment.fetch("body").include?("rubocop-comment-id")
@@ -85,6 +85,7 @@ def in_diff?(changed_files, path, line)
 end
 
 offences_outside_diff = []
+new_comments = []
 
 files_with_offenses.each do |file|
   path = file.fetch("path")
@@ -126,26 +127,25 @@ files_with_offenses.each do |file|
       Github.patch("/repos/#{owner_and_repository}/pulls/comments/#{comment_id}", body: body)
     elsif in_diff?(changed_ruby_files, path, line)
       puts "Commenting on #{path} line #{line}"
-
-      # Somehow the commit_id should not be just the HEAD SHA: https://stackoverflow.com/a/71431370/1075108
-      commit_id = github_event.fetch("pull_request").fetch("head").fetch("sha")
-
-      Github.post!(
-        "/repos/#{owner_and_repository}/pulls/#{pr_number}/comments",
-        body: body,
-        path: path,
-        commit_id: commit_id,
-        line: line,
-      )
+      new_comments << { path: path, line: line, side: "RIGHT", body: body }
     else
       offences_outside_diff << { path: path, line: line, message: message }
     end
   end
 end
 
+if new_comments.any?
+  puts "Posting #{new_comments.count} new comments as review(s)"
+
+  # Somehow the commit_id should not be just the HEAD SHA: https://stackoverflow.com/a/71431370/1075108
+  commit_id = github_event.fetch("pull_request").fetch("head").fetch("sha")
+
+  Github.create_reviews!(owner_and_repository, pr_number, commit_id, new_comments)
+end
+
 # If there are any offenses outside the diff, make a separate comment for them
 
-separate_comments = Github.get!("/repos/#{owner_and_repository}/issues/#{pr_number}/comments")
+separate_comments = Github.get_paginated!("/repos/#{owner_and_repository}/issues/#{pr_number}/comments")
 existing_separate_comment = separate_comments.find do |comment|
   comment.fetch("body").include?("rubocop-comment-id: outside-diff")
 end

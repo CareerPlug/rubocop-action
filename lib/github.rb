@@ -55,14 +55,35 @@ module Github
     end
   end
 
-  def self.pull_request_ruby_files(owner_and_repository, pr_number)
-    changed_files = []
+  PER_PAGE = 100
+  REVIEW_COMMENTS_PER_REQUEST = 50
+
+  def self.get_paginated!(path)
+    separator = path.include?("?") ? "&" : "?"
+    results = []
     1.step do |page|
-      files = Github.get!("/repos/#{owner_and_repository}/pulls/#{pr_number}/files?per_page=100&page=#{page}")
-      changed_files.concat(files)
-      break if files.length < 100
+      items = get!("#{path}#{separator}per_page=#{PER_PAGE}&page=#{page}")
+      results.concat(items)
+      break if items.length < PER_PAGE
     end
-    changed_files
+    results
+  end
+
+  # Posting each comment separately trips GitHub's secondary rate limit ("was submitted too quickly").
+  def self.create_reviews!(owner_and_repository, pr_number, commit_id, comments)
+    comments.each_slice(REVIEW_COMMENTS_PER_REQUEST) do |batch|
+      post!(
+        "/repos/#{owner_and_repository}/pulls/#{pr_number}/reviews",
+        commit_id: commit_id,
+        event: "COMMENT",
+        body: "Rubocop found #{batch.length} new offense(s).",
+        comments: batch,
+      )
+    end
+  end
+
+  def self.pull_request_ruby_files(owner_and_repository, pr_number)
+    get_paginated!("/repos/#{owner_and_repository}/pulls/#{pr_number}/files")
       .reject { |file| file.fetch("status") == "removed" }
       .select { |file| file.fetch("filename").end_with?(".rb") }
       .map { |file| File.new(file) }
