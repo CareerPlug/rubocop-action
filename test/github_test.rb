@@ -53,7 +53,7 @@ class GithubTest < Minitest::Test
     assert_equal "/repos/o/r/pulls/1/reviews", path
     assert_equal "COMMENT", params.fetch(:event)
     assert_equal "abc123", params.fetch(:commit_id)
-    refute_empty params.fetch(:body)
+    assert_equal [Github::REVIEW_BODY], posts.map { |_, params| params.fetch(:body) }.uniq
   end
 
   private

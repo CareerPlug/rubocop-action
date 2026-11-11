@@ -69,6 +69,10 @@ module Github
     results
   end
 
+  # Submitted reviews can't be deleted, so the body outlives the inline comments we later
+  # clean up. Keep it free of counts or anything else that goes stale.
+  REVIEW_BODY = "Rubocop offenses".freeze
+
   # Posting each comment separately trips GitHub's secondary rate limit ("was submitted too quickly").
   def self.create_reviews!(owner_and_repository, pr_number, commit_id, comments)
     comments.each_slice(REVIEW_COMMENTS_PER_REQUEST) do |batch|
@@ -76,7 +80,7 @@ module Github
         "/repos/#{owner_and_repository}/pulls/#{pr_number}/reviews",
         commit_id: commit_id,
         event: "COMMENT",
-        body: "Rubocop found #{batch.length} new offense(s).",
+        body: REVIEW_BODY,
         comments: batch,
       )
     end
