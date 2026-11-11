@@ -11,4 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
       - run: ruby test/github_test.rb

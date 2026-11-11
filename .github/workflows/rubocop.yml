@@ -12,6 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
       - uses: ./
         with:
           rubocop_arguments: --config .rubocop.yml
