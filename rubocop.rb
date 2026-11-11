@@ -102,8 +102,10 @@ files_with_offenses.each do |file|
       "#{correctable_prefix}#{offense.fetch('cop_name')}: #{offense.fetch('message')}"
     end.join("\n")
 
+    # Match on the full marker: a bare "a.rb-1" prefix would also match "a.rb-10".
+    marker = "<!-- rubocop-comment-id: #{path}-#{line} -->"
     body = <<~BODY
-      <!-- rubocop-comment-id: #{path}-#{line} -->
+      #{marker}
       #{message}
     BODY
 
@@ -111,7 +113,7 @@ files_with_offenses.each do |file|
     # Otherwise create a new comment.
 
     existing_comment = comments_made_by_rubocop.find do |comment|
-      comment.fetch("body").include?("rubocop-comment-id: #{path}-#{line}")
+      comment.fetch("body").include?(marker)
     end
 
     if existing_comment
