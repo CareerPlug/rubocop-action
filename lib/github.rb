@@ -56,7 +56,8 @@ module Github
   end
 
   PER_PAGE = 100
-  REVIEW_COMMENTS_PER_REQUEST = 50
+  # GitHub answered every 50-comment review with a 502 even though it created the review.
+  REVIEW_COMMENTS_PER_REQUEST = 20
 
   def self.get_paginated!(path)
     separator = path.include?("?") ? "&" : "?"
@@ -76,9 +77,12 @@ module Github
   # Posting each comment separately trips GitHub's secondary rate limit ("was submitted too quickly").
   # GitHub rejects a whole batch if any one comment is invalid, without saying which,
   # so a failure names the batch and its lines.
+  #
+  # A failed batch doesn't stop the later ones, and it isn't retried: a 5xx can arrive after
+  # GitHub created the review, so a retry could duplicate it. The next run posts whatever is missing.
   def self.create_reviews!(owner_and_repository, pr_number, commit_id, comments)
     batches = comments.each_slice(REVIEW_COMMENTS_PER_REQUEST).to_a
-    batches.each.with_index(1) do |batch, number|
+    failures = batches.each.with_index(1).filter_map do |batch, number|
       post!(
         "/repos/#{owner_and_repository}/pulls/#{pr_number}/reviews",
         commit_id: commit_id,
@@ -86,10 +90,13 @@ module Github
         body: REVIEW_BODY,
         comments: batch,
       )
+      nil
     rescue HttpError => e
       lines = batch.map { |comment| "#{comment.fetch(:path)}:#{comment.fetch(:line)}" }.join(", ")
-      raise HttpError, "Posting review batch #{number} of #{batches.length} failed (#{lines}): #{e.message}"
+      "Posting review batch #{number} of #{batches.length} failed (#{lines}): #{e.message}"
     end
+
+    raise HttpError, failures.join("\n") if failures.any?
   end
 
   def self.pull_request_ruby_files(owner_and_repository, pr_number)

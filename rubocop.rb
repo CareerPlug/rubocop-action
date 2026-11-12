@@ -145,7 +145,12 @@ begin
     # Somehow the commit_id should not be just the HEAD SHA: https://stackoverflow.com/a/71431370/1075108
     commit_id = github_event.fetch("pull_request").fetch("head").fetch("sha")
 
-    Github.create_reviews!(owner_and_repository, pr_number, commit_id, new_comments)
+    # Warn and carry on, so a failed batch doesn't also skip the outside-diff comment below.
+    begin
+      Github.create_reviews!(owner_and_repository, pr_number, commit_id, new_comments)
+    rescue Github::HttpError => e
+      puts "::warning::#{e.message.gsub("\n", '%0A')}"
+    end
   end
 
   # If there are any offenses outside the diff, make a separate comment for them

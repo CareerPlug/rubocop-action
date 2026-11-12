@@ -46,7 +46,7 @@ class GithubTest < Minitest::Test
       Github.create_reviews!("o/r", 1, "abc123", comments)
     end
 
-    assert_equal [50, 50, 20], posts.map { |_, params| params.fetch(:comments).length }
+    assert_equal [20, 20, 20, 20, 20, 20], posts.map { |_, params| params.fetch(:comments).length }
     assert_equal comments, posts.flat_map { |_, params| params.fetch(:comments) }
 
     path, params = posts.first
@@ -57,7 +57,7 @@ class GithubTest < Minitest::Test
   end
 
   def test_create_reviews_names_the_failed_batch_and_its_lines
-    comments = Array.new(60) { |i| { path: "a.rb", line: i + 1, side: "RIGHT", body: "offense #{i}" } }
+    comments = Array.new(30) { |i| { path: "a.rb", line: i + 1, side: "RIGHT", body: "offense #{i}" } }
     posts = 0
     post = lambda do |_path, _params|
       posts += 1
@@ -69,10 +69,37 @@ class GithubTest < Minitest::Test
     end
 
     assert_match "batch 2 of 2", error.message
-    assert_match "a.rb:51, a.rb:52", error.message
-    assert_match "a.rb:60", error.message
-    refute_match "a.rb:50,", error.message
+    assert_match "a.rb:21, a.rb:22", error.message
+    assert_match "a.rb:30", error.message
+    refute_match "a.rb:20,", error.message
     assert_match "status: 422", error.message
+  end
+
+  def test_create_reviews_keeps_posting_after_a_failed_batch
+    comments = Array.new(60) { |i| { path: "a.rb", line: i + 1, side: "RIGHT", body: "offense #{i}" } }
+    attempted = []
+    post = lambda do |_path, params|
+      attempted << params.fetch(:comments).first.fetch(:line)
+      raise Github::HttpError, "status: 502" if attempted.length == 1
+    end
+
+    error = stub_github(:post!, post) do
+      assert_raises(Github::HttpError) { Github.create_reviews!("o/r", 1, "abc123", comments) }
+    end
+
+    assert_equal [1, 21, 41], attempted
+    assert_match "batch 1 of 3", error.message
+    refute_match "batch 2", error.message
+  end
+
+  def test_create_reviews_reports_every_failed_batch
+    comments = Array.new(60) { |i| { path: "a.rb", line: i + 1, side: "RIGHT", body: "offense #{i}" } }
+
+    error = stub_github(:post!, ->(_path, _params) { raise Github::HttpError, "status: 502" }) do
+      assert_raises(Github::HttpError) { Github.create_reviews!("o/r", 1, "abc123", comments) }
+    end
+
+    assert_equal ["batch 1 of 3", "batch 2 of 3", "batch 3 of 3"], error.message.scan(/batch \d of \d/)
   end
 
   private
