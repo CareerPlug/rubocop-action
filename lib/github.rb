@@ -74,22 +74,36 @@ module Github
   # clean up. Keep it free of counts or anything else that goes stale.
   REVIEW_BODY = "Rubocop offenses".freeze
 
+  # GitHub's secondary rate limit allows roughly 80 new comments a minute, counting each inline
+  # comment in a review. When it kicks in we wait and retry, within a total budget per run.
+  RATE_LIMIT_DEFAULT_WAIT = 60
+  RATE_LIMIT_MAX_TOTAL_WAIT = 300
+
   # Posting each comment separately trips GitHub's secondary rate limit ("was submitted too quickly").
   # GitHub rejects a whole batch if any one comment is invalid, without saying which,
   # so a failure names the batch and its lines.
   #
-  # A failed batch doesn't stop the later ones, and it isn't retried: a 5xx can arrive after
-  # GitHub created the review, so a retry could duplicate it. The next run posts whatever is missing.
+  # A failed batch doesn't stop the later ones. Only rate-limit rejections are retried, since
+  # nothing was created; a 5xx can arrive after GitHub created the review, so retrying it could
+  # duplicate the review. The next run posts whatever is missing.
   def self.create_reviews!(owner_and_repository, pr_number, commit_id, comments)
+    path = "/repos/#{owner_and_repository}/pulls/#{pr_number}/reviews"
     batches = comments.each_slice(REVIEW_COMMENTS_PER_REQUEST).to_a
+    wait_left = RATE_LIMIT_MAX_TOTAL_WAIT
+
     failures = batches.each.with_index(1).filter_map do |batch, number|
-      post!(
-        "/repos/#{owner_and_repository}/pulls/#{pr_number}/reviews",
-        commit_id: commit_id,
-        event: "COMMENT",
-        body: REVIEW_BODY,
-        comments: batch,
-      )
+      params = { commit_id: commit_id, event: "COMMENT", body: REVIEW_BODY, comments: batch }
+      loop do
+        response = post(path, params)
+        break if response.is_a?(Net::HTTPSuccess)
+
+        wait = rate_limit_wait(response)
+        raise HttpError, "status: #{response.code}, body: #{response.body}" unless wait && wait <= wait_left
+
+        puts "GitHub rate limit hit on review batch #{number} of #{batches.length}, retrying in #{wait}s"
+        wait_left -= wait
+        pause(wait)
+      end
       nil
     rescue HttpError => e
       lines = batch.map { |comment| "#{comment.fetch(:path)}:#{comment.fetch(:line)}" }.join(", ")
@@ -97,6 +111,19 @@ module Github
     end
 
     raise HttpError, failures.join("\n") if failures.any?
+  end
+
+  # Seconds to wait before retrying a rate-limited response, or nil if it wasn't rate limited.
+  def self.rate_limit_wait(response)
+    rate_limited = response.code == "429" ||
+      (response.code == "403" && response.body.to_s.include?("rate limit"))
+    return unless rate_limited
+
+    Integer(response["retry-after"].to_s, exception: false) || RATE_LIMIT_DEFAULT_WAIT
+  end
+
+  def self.pause(seconds)
+    sleep seconds
   end
 
   def self.pull_request_ruby_files(owner_and_repository, pr_number)
