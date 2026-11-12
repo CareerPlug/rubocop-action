@@ -56,6 +56,25 @@ class GithubTest < Minitest::Test
     assert_equal [Github::REVIEW_BODY], posts.map { |_, params| params.fetch(:body) }.uniq
   end
 
+  def test_create_reviews_names_the_failed_batch_and_its_lines
+    comments = Array.new(60) { |i| { path: "a.rb", line: i + 1, side: "RIGHT", body: "offense #{i}" } }
+    posts = 0
+    post = lambda do |_path, _params|
+      posts += 1
+      raise Github::HttpError, "status: 422" if posts == 2
+    end
+
+    error = stub_github(:post!, post) do
+      assert_raises(Github::HttpError) { Github.create_reviews!("o/r", 1, "abc123", comments) }
+    end
+
+    assert_match "batch 2 of 2", error.message
+    assert_match "a.rb:51, a.rb:52", error.message
+    assert_match "a.rb:60", error.message
+    refute_match "a.rb:50,", error.message
+    assert_match "status: 422", error.message
+  end
+
   private
 
   def stub_github(method_name, implementation)

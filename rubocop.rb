@@ -46,148 +46,154 @@ files_with_offenses =
     []
   end
 
-# Fetch existing pull request comments
+# A failed GitHub request here should not fail the check on its own: the exit code
+# below is driven by the offenses, so `failure_exit_code: 0` stays non-blocking.
+begin
+  # Fetch existing pull request comments
 
-puts "Fetching PR comments from https://api.github.com/repos/#{owner_and_repository}/pulls/#{pr_number}/comments"
+  puts "Fetching PR comments from https://api.github.com/repos/#{owner_and_repository}/pulls/#{pr_number}/comments"
 
-existing_comments = Github.get_paginated!("/repos/#{owner_and_repository}/pulls/#{pr_number}/comments")
+  existing_comments = Github.get_paginated!("/repos/#{owner_and_repository}/pulls/#{pr_number}/comments")
 
-comments_made_by_rubocop = existing_comments.select do |comment|
-  comment.fetch("body").include?("rubocop-comment-id")
-end
+  comments_made_by_rubocop = existing_comments.select do |comment|
+    comment.fetch("body").include?("rubocop-comment-id")
+  end
 
-# Find existing comments which no longer have offenses and delete them
+  # Find existing comments which no longer have offenses and delete them
 
-fixed_comments = comments_made_by_rubocop.reject do |comment|
-  files_with_offenses.any? do |file|
-    file.fetch("path") == comment.fetch("path") &&
-      file.fetch("offenses").any? do |offense|
-        offense.fetch("location").fetch("line") == comment.fetch("line")
+  fixed_comments = comments_made_by_rubocop.reject do |comment|
+    files_with_offenses.any? do |file|
+      file.fetch("path") == comment.fetch("path") &&
+        file.fetch("offenses").any? do |offense|
+          offense.fetch("location").fetch("line") == comment.fetch("line")
+        end
+    end
+  end
+
+  fixed_comments.each do |comment|
+    comment_id = comment.fetch("id")
+    path = comment.fetch("path")
+    line = comment.fetch("line")
+
+    puts "Deleting resolved comment #{comment_id} on #{path} line #{line}"
+
+    Github.delete!("/repos/#{owner_and_repository}/pulls/comments/#{comment_id}")
+  end
+
+  # Comment on the pull request with the offenses found
+
+  def in_diff?(changed_files, path, line)
+    file = changed_files.find { |changed_file| changed_file.path == path }
+    file&.changed_lines&.include?(line)
+  end
+
+  offences_outside_diff = []
+  new_comments = []
+
+  files_with_offenses.each do |file|
+    path = file.fetch("path")
+    offenses_by_line = file.fetch("offenses").group_by do |offense|
+      offense.fetch("location").fetch("line")
+    end
+
+    # Group offenses by line number and make a single comment per line
+    offenses_by_line.each do |line, offenses|
+      puts "Handling #{path} line #{line} with #{offenses.count} offenses"
+
+      message = offenses.map do |offense|
+        correctable_prefix = "[Correctable] " if offense.fetch("correctable")
+        "#{correctable_prefix}#{offense.fetch('cop_name')}: #{offense.fetch('message')}"
+      end.join("\n")
+
+      # Match on the full marker: a bare "a.rb-1" prefix would also match "a.rb-10".
+      marker = "<!-- rubocop-comment-id: #{path}-#{line} -->"
+      body = <<~BODY
+        #{marker}
+        #{message}
+      BODY
+
+      # If there is already a comment on this line, update it if necessary.
+      # Otherwise create a new comment.
+
+      existing_comment = comments_made_by_rubocop.find do |comment|
+        comment.fetch("body").include?(marker)
       end
-  end
-end
 
-fixed_comments.each do |comment|
-  comment_id = comment.fetch("id")
-  path = comment.fetch("path")
-  line = comment.fetch("line")
+      if existing_comment
+        comment_id = existing_comment.fetch("id")
 
-  puts "Deleting resolved comment #{comment_id} on #{path} line #{line}"
+        # No need to do anything if the offense already exists and hasn't changed
+        if existing_comment.fetch("body") == body
+          puts "Skipping unchanged comment #{comment_id} on #{path} line #{line}"
+          next
+        end
 
-  Github.delete!("/repos/#{owner_and_repository}/pulls/comments/#{comment_id}")
-end
-
-# Comment on the pull request with the offenses found
-
-def in_diff?(changed_files, path, line)
-  file = changed_files.find { |changed_file| changed_file.path == path }
-  file&.changed_lines&.include?(line)
-end
-
-offences_outside_diff = []
-new_comments = []
-
-files_with_offenses.each do |file|
-  path = file.fetch("path")
-  offenses_by_line = file.fetch("offenses").group_by do |offense|
-    offense.fetch("location").fetch("line")
+        puts "Updating comment #{comment_id} on #{path} line #{line}"
+        Github.patch("/repos/#{owner_and_repository}/pulls/comments/#{comment_id}", body: body)
+      elsif in_diff?(changed_ruby_files, path, line)
+        puts "Commenting on #{path} line #{line}"
+        new_comments << { path: path, line: line, side: "RIGHT", body: body }
+      else
+        offences_outside_diff << { path: path, line: line, message: message }
+      end
+    end
   end
 
-  # Group offenses by line number and make a single comment per line
-  offenses_by_line.each do |line, offenses|
-    puts "Handling #{path} line #{line} with #{offenses.count} offenses"
+  if new_comments.any?
+    puts "Posting #{new_comments.count} new comments as review(s)"
 
-    message = offenses.map do |offense|
-      correctable_prefix = "[Correctable] " if offense.fetch("correctable")
-      "#{correctable_prefix}#{offense.fetch('cop_name')}: #{offense.fetch('message')}"
-    end.join("\n")
+    # Somehow the commit_id should not be just the HEAD SHA: https://stackoverflow.com/a/71431370/1075108
+    commit_id = github_event.fetch("pull_request").fetch("head").fetch("sha")
 
-    # Match on the full marker: a bare "a.rb-1" prefix would also match "a.rb-10".
-    marker = "<!-- rubocop-comment-id: #{path}-#{line} -->"
+    Github.create_reviews!(owner_and_repository, pr_number, commit_id, new_comments)
+  end
+
+  # If there are any offenses outside the diff, make a separate comment for them
+
+  separate_comments = Github.get_paginated!("/repos/#{owner_and_repository}/issues/#{pr_number}/comments")
+  existing_separate_comment = separate_comments.find do |comment|
+    comment.fetch("body").include?("rubocop-comment-id: outside-diff")
+  end
+
+  if offences_outside_diff.any?
+    puts "Found #{offences_outside_diff.count} offenses outside of the diff"
+
     body = <<~BODY
-      #{marker}
-      #{message}
+      <!-- rubocop-comment-id: outside-diff -->
+      Rubocop offenses found outside of the diff:
+
     BODY
 
-    # If there is already a comment on this line, update it if necessary.
-    # Otherwise create a new comment.
+    body += offences_outside_diff.map do |offense|
+      "**#{offense.fetch(:path)}:#{offense.fetch(:line)}**\n#{offense.fetch(:message)}"
+    end.join("\n\n")
 
-    existing_comment = comments_made_by_rubocop.find do |comment|
-      comment.fetch("body").include?(marker)
-    end
-
-    if existing_comment
-      comment_id = existing_comment.fetch("id")
+    if existing_separate_comment
+      existing_comment_id = existing_separate_comment.fetch("id")
 
       # No need to do anything if the offense already exists and hasn't changed
-      if existing_comment.fetch("body") == body
-        puts "Skipping unchanged comment #{comment_id} on #{path} line #{line}"
-        next
+      if existing_separate_comment.fetch("body") == body
+        puts "Skipping unchanged separate comment #{existing_comment_id}"
+      else
+        puts "Updating separate comment #{existing_comment_id}"
+        Github.patch!("/repos/#{owner_and_repository}/issues/comments/#{existing_comment_id}", body: body)
       end
-
-      puts "Updating comment #{comment_id} on #{path} line #{line}"
-      Github.patch("/repos/#{owner_and_repository}/pulls/comments/#{comment_id}", body: body)
-    elsif in_diff?(changed_ruby_files, path, line)
-      puts "Commenting on #{path} line #{line}"
-      new_comments << { path: path, line: line, side: "RIGHT", body: body }
     else
-      offences_outside_diff << { path: path, line: line, message: message }
+      puts "Commenting on pull request with offenses found outside the diff"
+
+      if ENV.fetch("OUTSIDE_DIFF", "true") == "true"
+        Github.post!("/repos/#{owner_and_repository}/issues/#{pr_number}/comments", body: body)
+      end
     end
-  end
-end
-
-if new_comments.any?
-  puts "Posting #{new_comments.count} new comments as review(s)"
-
-  # Somehow the commit_id should not be just the HEAD SHA: https://stackoverflow.com/a/71431370/1075108
-  commit_id = github_event.fetch("pull_request").fetch("head").fetch("sha")
-
-  Github.create_reviews!(owner_and_repository, pr_number, commit_id, new_comments)
-end
-
-# If there are any offenses outside the diff, make a separate comment for them
-
-separate_comments = Github.get_paginated!("/repos/#{owner_and_repository}/issues/#{pr_number}/comments")
-existing_separate_comment = separate_comments.find do |comment|
-  comment.fetch("body").include?("rubocop-comment-id: outside-diff")
-end
-
-if offences_outside_diff.any?
-  puts "Found #{offences_outside_diff.count} offenses outside of the diff"
-
-  body = <<~BODY
-    <!-- rubocop-comment-id: outside-diff -->
-    Rubocop offenses found outside of the diff:
-
-  BODY
-
-  body += offences_outside_diff.map do |offense|
-    "**#{offense.fetch(:path)}:#{offense.fetch(:line)}**\n#{offense.fetch(:message)}"
-  end.join("\n\n")
-
-  if existing_separate_comment
+  elsif existing_separate_comment
     existing_comment_id = existing_separate_comment.fetch("id")
-
-    # No need to do anything if the offense already exists and hasn't changed
-    if existing_separate_comment.fetch("body") == body
-      puts "Skipping unchanged separate comment #{existing_comment_id}"
-    else
-      puts "Updating separate comment #{existing_comment_id}"
-      Github.patch!("/repos/#{owner_and_repository}/issues/comments/#{existing_comment_id}", body: body)
-    end
+    puts "Deleting resolved separate comment #{existing_comment_id}"
+    Github.delete("/repos/#{owner_and_repository}/issues/comments/#{existing_comment_id}")
   else
-    puts "Commenting on pull request with offenses found outside the diff"
-
-    if ENV.fetch("OUTSIDE_DIFF", "true") == "true"
-      Github.post!("/repos/#{owner_and_repository}/issues/#{pr_number}/comments", body: body)
-    end
+    puts "No offenses found outside of the diff and no existing separate comment to remove"
   end
-elsif existing_separate_comment
-  existing_comment_id = existing_separate_comment.fetch("id")
-  puts "Deleting resolved separate comment #{existing_comment_id}"
-  Github.delete("/repos/#{owner_and_repository}/issues/comments/#{existing_comment_id}")
-else
-  puts "No offenses found outside of the diff and no existing separate comment to remove"
+rescue Github::HttpError => e
+  puts "::warning::Could not sync rubocop comments on the pull request: #{e.message}"
 end
 
 # Fail the build if there were any offenses

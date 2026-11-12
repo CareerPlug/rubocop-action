@@ -74,8 +74,11 @@ module Github
   REVIEW_BODY = "Rubocop offenses".freeze
 
   # Posting each comment separately trips GitHub's secondary rate limit ("was submitted too quickly").
+  # GitHub rejects a whole batch if any one comment is invalid, without saying which,
+  # so a failure names the batch and its lines.
   def self.create_reviews!(owner_and_repository, pr_number, commit_id, comments)
-    comments.each_slice(REVIEW_COMMENTS_PER_REQUEST) do |batch|
+    batches = comments.each_slice(REVIEW_COMMENTS_PER_REQUEST).to_a
+    batches.each.with_index(1) do |batch, number|
       post!(
         "/repos/#{owner_and_repository}/pulls/#{pr_number}/reviews",
         commit_id: commit_id,
@@ -83,6 +86,9 @@ module Github
         body: REVIEW_BODY,
         comments: batch,
       )
+    rescue HttpError => e
+      lines = batch.map { |comment| "#{comment.fetch(:path)}:#{comment.fetch(:line)}" }.join(", ")
+      raise HttpError, "Posting review batch #{number} of #{batches.length} failed (#{lines}): #{e.message}"
     end
   end
 
