@@ -114,12 +114,25 @@ module Github
   end
 
   # Seconds to wait before retrying a rate-limited response, or nil if it wasn't rate limited.
+  # Follows GitHub's order: retry-after, then the primary limit's reset time (which can be up
+  # to an hour away, so create_reviews! gives up at once when it's past the budget), then a minute.
+  # At least a second, so a retry-after of 0 still counts against the budget.
   def self.rate_limit_wait(response)
     rate_limited = response.code == "429" ||
       (response.code == "403" && response.body.to_s.include?("rate limit"))
     return unless rate_limited
 
-    Integer(response["retry-after"].to_s, exception: false) || RATE_LIMIT_DEFAULT_WAIT
+    retry_after = Integer(response["retry-after"].to_s, exception: false)
+    reset_at = Integer(response["x-ratelimit-reset"].to_s, exception: false)
+    wait =
+      if retry_after
+        retry_after
+      elsif response["x-ratelimit-remaining"] == "0" && reset_at
+        reset_at - Time.now.to_i
+      else
+        RATE_LIMIT_DEFAULT_WAIT
+      end
+    [wait, 1].max
   end
 
   def self.pause(seconds)
@@ -133,6 +146,13 @@ module Github
       .map { |file| File.new(file) }
   end
 
+  # Raised as HttpError so callers handle a dropped connection like a failed response.
+  # A timed-out POST may still have been applied, so these aren't retried.
+  NETWORK_ERRORS = [
+    Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout, SocketError, SystemCallError,
+    OpenSSL::SSL::SSLError, EOFError, IOError,
+  ].freeze
+
   def self.request(request_class, path, params = nil)
     request = request_class.new(path)
     request.content_type = "application/json"
@@ -141,5 +161,7 @@ module Github
     request["Accept"] = "application/vnd.github.v3+json"
 
     CONNECTION.request(request)
+  rescue *NETWORK_ERRORS => e
+    raise HttpError, "network error: #{e.class}: #{e.message}"
   end
 end

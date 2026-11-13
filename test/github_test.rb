@@ -157,6 +157,81 @@ class GithubTest < Minitest::Test
     assert_equal 1, posts
   end
 
+  def test_create_reviews_waits_at_least_a_second_when_retry_after_is_zero
+    responses = [http_response(429, "{}", "retry-after" => "0"), http_response(200)]
+    pauses = []
+
+    stub_github(:post, ->(_path, _params) { responses.shift }) do
+      stub_github(:pause, ->(seconds) { pauses << seconds }) do
+        Github.create_reviews!("o/r", 1, "abc123", review_comments(10))
+      end
+    end
+
+    assert_equal [1], pauses
+  end
+
+  def test_create_reviews_gives_up_at_once_when_the_primary_rate_limit_resets_beyond_the_budget
+    posts = 0
+    post = lambda do |_path, _params|
+      posts += 1
+      http_response(403, '{"message":"API rate limit exceeded for installation"}',
+        "x-ratelimit-remaining" => "0", "x-ratelimit-reset" => (Time.now.to_i + 3600).to_s)
+    end
+
+    error = stub_github(:post, post) do
+      stub_github(:pause, ->(_seconds) { flunk "should not wait" }) do
+        assert_raises(Github::HttpError) { Github.create_reviews!("o/r", 1, "abc123", review_comments(10)) }
+      end
+    end
+
+    assert_equal 1, posts
+    assert_match "API rate limit exceeded", error.message
+  end
+
+  def test_create_reviews_waits_for_the_primary_rate_limit_reset_when_it_fits_the_budget
+    responses = [
+      http_response(403, '{"message":"API rate limit exceeded"}',
+        "x-ratelimit-remaining" => "0", "x-ratelimit-reset" => (Time.now.to_i + 30).to_s),
+      http_response(200),
+    ]
+    pauses = []
+
+    stub_github(:post, ->(_path, _params) { responses.shift }) do
+      stub_github(:pause, ->(seconds) { pauses << seconds }) do
+        Github.create_reviews!("o/r", 1, "abc123", review_comments(10))
+      end
+    end
+
+    assert_equal 1, pauses.length
+    assert_includes 29..31, pauses.first
+  end
+
+  def test_create_reviews_keeps_posting_after_a_batch_times_out
+    attempted = []
+    connection_request = lambda do |request|
+      attempted << JSON.parse(request.body).fetch("comments").first.fetch("line")
+      raise Net::ReadTimeout if attempted.length == 1
+
+      http_response(200)
+    end
+
+    error = stub_connection(connection_request) do
+      assert_raises(Github::HttpError) { Github.create_reviews!("o/r", 1, "abc123", review_comments(40)) }
+    end
+
+    assert_equal [1, 21], attempted
+    assert_match "batch 1 of 2", error.message
+    assert_match "Net::ReadTimeout", error.message
+  end
+
+  def test_request_turns_network_errors_into_http_errors
+    [Net::OpenTimeout, SocketError, Errno::ECONNRESET, OpenSSL::SSL::SSLError, EOFError].each do |error_class|
+      stub_connection(->(_request) { raise error_class }) do
+        assert_raises(Github::HttpError) { Github.get("/repos/o/r") }
+      end
+    end
+  end
+
   private
 
   def review_comments(count)
@@ -169,6 +244,14 @@ class GithubTest < Minitest::Test
       response.instance_variable_set(:@read, true)
       headers.each { |name, value| response[name] = value }
     end
+  end
+
+  def stub_connection(implementation)
+    ENV["GITHUB_TOKEN"] ||= "test-token"
+    Github::CONNECTION.define_singleton_method(:request) { |request| implementation.call(request) }
+    yield
+  ensure
+    Github::CONNECTION.singleton_class.send(:remove_method, :request)
   end
 
   def stub_github(method_name, implementation)
