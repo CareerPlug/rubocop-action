@@ -73,7 +73,8 @@ begin
   fixed_comments.each do |comment|
     comment_id = comment.fetch("id")
     path = comment.fetch("path")
-    line = comment.fetch("line")
+    # An outdated comment has no current line, so log the line it was made on.
+    line = comment.fetch("line") || "#{comment.fetch('original_line')} (outdated)"
 
     puts "Deleting resolved comment #{comment_id} on #{path} line #{line}"
 
