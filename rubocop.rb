@@ -80,6 +80,11 @@ begin
     Github.delete!("/repos/#{owner_and_repository}/pulls/comments/#{comment_id}")
   end
 
+  # A push that edits a commented line makes the comment outdated (its "line" becomes null),
+  # so it's deleted above even if the offense remains. Forget it, so the offense is commented
+  # on afresh below instead of "updating" a comment that no longer exists.
+  comments_made_by_rubocop -= fixed_comments
+
   # Comment on the pull request with the offenses found
 
   def in_diff?(changed_files, path, line)
