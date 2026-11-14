@@ -66,4 +66,6 @@ Allows you to pass additional arguments to rubocop. E.g.
 
 ### Known issues
 
-We don't handle hitting API rate limits on the GitHub API. Presumably this could end up being a problem if you create a pull request with a ton of offences requiring inline comments. Shouldn't be a problem for normal use though.
+GitHub allows roughly 80 new comments a minute. New inline comments are posted as reviews of up to 20, and when GitHub's rate limit kicks in the action waits and retries, for up to 5 minutes per run. So a pull request with more than ~80 new offences takes about a minute longer per extra ~80, and past ~380 the rest are posted on the next run.
+
+Updates and deletes of existing comments are one request each and aren't retried. If a GitHub request fails, the action logs a warning and the exit code still follows `failure_exit_code`, so a non-blocking setup stays non-blocking.
